@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<usb-device vendor-id="12346" product-id="16385" />  <!-- ESP32-S3 defaults: VID=0x303A (12346 decimal), PID=0x1001 (4097 decimal); check with "lsusb" on PC -->
+<!-- <usb-device vendor-id="12346" product-id="16385" /> -->
