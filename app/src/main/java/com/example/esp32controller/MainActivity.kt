@@ -98,14 +98,14 @@ class MainActivity : AppCompatActivity() {
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
             if (isGranted) {
                 // Permission granted — start camera
-                startCameraIfReady()
+               // startCameraIfReady()
             } else {
                 // Permission denied — show rationale or direct to settings
                 if (shouldShowRequestPermissionRationale(Manifest.permission.CAMERA)) {
-                    showPermissionRationaleDialog()
+                   // showPermissionRationaleDialog()
                 } else {
                     // User permanently denied (Don't ask again) — guide them to settings
-                    showGoToSettingsDialog()
+                   // showGoToSettingsDialog()
                 }
             }
         }
