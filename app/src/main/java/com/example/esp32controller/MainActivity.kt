@@ -15,7 +15,7 @@ import java.util.concurrent.ExecutorService
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.RectF
-import android.util.Log
+//import android.util.Log
 import androidx.camera.core.ImageAnalysis
 import android.util.Size
 import androidx.camera.core.Preview
@@ -31,10 +31,10 @@ import java.nio.channels.FileChannel
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import androidx.camera.core.CameraInfo
-import fi.iki.elonen.NanoWSD
-import fi.iki.elonen.NanoWSD.WebSocket
-import android.net.wifi.WifiManager
-import android.text.format.Formatter
+//import fi.iki.elonen.NanoWSD
+//import fi.iki.elonen.NanoWSD.WebSocket
+//import android.net.wifi.WifiManager
+//import android.text.format.Formatter
 
 
 import android.app.PendingIntent
@@ -51,9 +51,9 @@ import androidx.appcompat.app.AppCompatActivity
 import com.hoho.android.usbserial.driver.UsbSerialPort
 import com.hoho.android.usbserial.driver.UsbSerialProber
 import java.io.IOException
-import com.example.esp32controller.R
+//import com.example.esp32controller.R
 import android.widget.ScrollView   // For ScrollView class
-import android.view.View
+//import android.view.View
 import android.widget.Button
 import com.example.objecttrackerapp.OverlayView
 
@@ -148,7 +148,7 @@ class MainActivity : AppCompatActivity() {
 
         setContentView(R.layout.activity_main)
 
-        usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
+        usbManager = getSystemService(USB_SERVICE) as UsbManager
 
         panSeekBar = findViewById(R.id.pan_seekbar)
         tiltSeekBar = findViewById(R.id.tilt_seekbar)
