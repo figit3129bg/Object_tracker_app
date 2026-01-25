@@ -11,10 +11,11 @@
         android:id="@+id/cameraContainer"
         android:layout_width="0dp"
         android:layout_height="0dp"
+
         app:layout_constraintTop_toTopOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintHeight_percent="0.55">
+        app:layout_constraintHeight_percent="0.65">
 
         <androidx.camera.view.PreviewView
             android:id="@+id/previewView"
@@ -46,8 +47,7 @@
             android:textColor="@android:color/white"
             android:textSize="16sp"
             android:layout_marginStart="16dp"
-            android:layout_marginBottom="32dp"
-            android:layout_marginEnd="16dp"
+            android:layout_marginBottom="64dp"
             android:layout_gravity="bottom|start" />
 
         <!-- Zoom slider -->
@@ -67,12 +67,12 @@
             android:id="@+id/confidenceText"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
+            android:layout_gravity="bottom|start"
+            android:layout_marginStart="16dp"
+            android:layout_marginBottom="32dp"
             android:text="Confidence: 0.35"
             android:textColor="@android:color/white"
-            android:textSize="16sp"
-            android:layout_marginStart="16dp"
-            android:layout_marginBottom="64dp"
-            android:layout_gravity="bottom|start" />
+            android:textSize="16sp" />
 
         <!-- Confidence slider -->
         <SeekBar
@@ -92,6 +92,7 @@
     <!-- ================= BOTTOM: PAN / TILT / ESP32 ================= -->
 
     <ScrollView
+        android:id="@+id/bottomContainer"
         android:layout_width="0dp"
         android:layout_height="0dp"
         app:layout_constraintTop_toBottomOf="@id/cameraContainer"
@@ -103,7 +104,10 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
-            android:padding="16dp">
+            android:layout_marginTop="8dp"
+            android:layout_marginBottom="8dp"
+            android:layout_marginStart="8dp"
+            android:layout_marginEnd="8dp">
 
             <TextView
                 android:id="@+id/pan_value"
@@ -136,7 +140,7 @@
 
             <ScrollView
                 android:layout_width="match_parent"
-                android:layout_height="150dp">
+                android:layout_height="91dp">
 
                 <TextView
                     android:id="@+id/serial_output"
@@ -151,7 +155,9 @@
                 android:layout_height="wrap_content"
                 android:orientation="horizontal"
                 android:gravity="center"
-                android:layout_marginTop="16dp">
+                android:layout_marginBottom="8dp">
+                <!--android:layout_marginTop="16dp" -->
+
 
                 <Button
                     android:id="@+id/tilt_homing_Button"
