@@ -1,5 +1,6 @@
 package com.example.esp32controller
 
+import android.util.Log
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.ImageFormat
@@ -55,7 +56,16 @@ import java.io.IOException
 import android.widget.ScrollView   // For ScrollView class
 //import android.view.View
 import android.widget.Button
-import com.example.objecttrackerapp.OverlayView
+import com.example.esp32controller.OverlayView
+
+
+import android.content.*
+import android.hardware.usb.*
+import com.hoho.android.usbserial.driver.*
+import java.text.SimpleDateFormat
+import java.util.*
+import kotlin.concurrent.thread
+
 
 class MainActivity : AppCompatActivity() {
 
@@ -126,16 +136,27 @@ class MainActivity : AppCompatActivity() {
 
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            if (intent.action == UsbManager.ACTION_USB_DEVICE_ATTACHED) {
-                connectToUsbDevice()
-            } else if (intent.action == UsbManager.ACTION_USB_DEVICE_DETACHED) {
-                disconnectUsb()
+            if (intent.action == "USB_PERMISSION") {
+                synchronized(this) {
+                    val device: UsbDevice? =
+                        intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+
+                    if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
+                        device?.let {
+                            openSerialPort(it)
+                        }
+                    } else {
+                        Log.e("USB_SERIAL", "USB permission denied")
+                    }
+                }
             }
         }
     }
 
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Log.d("USB_DEBUG", "onCreate() started - app is launching")
 
 
         cameraExecutor = Executors.newSingleThreadExecutor()
@@ -145,7 +166,7 @@ class MainActivity : AppCompatActivity() {
         confidenceThreshold = sharedPrefs.getFloat(KEY_CONFIDENCE, 0.35f)
         // Load saved zoom, default to 0f (slider 0%)
         val savedZoom = sharedPrefs.getFloat(KEY_ZOOM, 0f)
-
+        Log.d("USB_DEBUG", "onCreate() started - loading saved preferences")
         setContentView(R.layout.activity_main)
 
         usbManager = getSystemService(USB_SERVICE) as UsbManager
@@ -164,6 +185,8 @@ class MainActivity : AppCompatActivity() {
         tiltSeekBar.progress = 500
 
 
+        Log.d("USB_DEBUG", "onCreate() started - loading layout")
+
         val tiltHomingButton: Button = findViewById(R.id.tilt_homing_Button)
         val panHomingButton: Button = findViewById(R.id.pan_homing_Button)
         val bothHomingButton: Button = findViewById(R.id.pan_tilt_homing_Button)
@@ -175,11 +198,13 @@ class MainActivity : AppCompatActivity() {
         confidenceSlider.progress = ((confidenceThreshold - 0.25f) * 100).toInt()
         confidenceText.text = "Confidence: %.2f".format(confidenceThreshold)
 
+        Log.d("USB_DEBUG", "onCreate() started - confidence calculation")
+
         confidenceSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 confidenceThreshold = 0.25f + (progress / 100f)
                 confidenceText.text = "Confidence: %.2f".format(confidenceThreshold)
-
+                Log.d("USB_DEBUG", "onCreate() started - send confidence")
                 // Save
                 sharedPrefs.edit().putFloat(KEY_CONFIDENCE, confidenceThreshold).apply()
             }
@@ -208,7 +233,7 @@ class MainActivity : AppCompatActivity() {
 
 
         val selectButton = findViewById<Button>(R.id.selectClassesButton)
-
+        Log.d("USB_DEBUG", "onCreate() started - loading tracking object button")
         selectButton.setOnClickListener {
             val checkedItems = BooleanArray(classNames.size) { i -> selectedClasses.contains(i) }
 
@@ -224,6 +249,7 @@ class MainActivity : AppCompatActivity() {
                 .setPositiveButton("OK", null)
                 .show()
         }
+        Log.d("USB_DEBUG", "onCreate() started - ended loading tracking object button")
         val options = Interpreter.Options().apply {
             setNumThreads(6)
         }
@@ -232,19 +258,22 @@ class MainActivity : AppCompatActivity() {
 
 
 
-
+        Log.d("USB_DEBUG", "onCreate() started - buttons for homing")
         tiltHomingButton.setOnClickListener {
             sendCommand("Homing:1\n")
+            Log.d("USB_DEBUG", "onCreate() started - send Homing 1")
             Toast.makeText(this, "Tilt Homing sent", Toast.LENGTH_SHORT).show()
         }
 
         panHomingButton.setOnClickListener {
             sendCommand("Homing:2\n")
+            Log.d("USB_DEBUG", "onCreate() started - send Homing 2")
             Toast.makeText(this, "Pan Homing sent", Toast.LENGTH_SHORT).show()
         }
 
         bothHomingButton.setOnClickListener {
             sendCommand("Homing:3\n")
+            Log.d("USB_DEBUG", "onCreate() started - send Homing 3")
             Toast.makeText(this, "Both Homing sent", Toast.LENGTH_SHORT).show()
         }
 
@@ -268,15 +297,21 @@ class MainActivity : AppCompatActivity() {
 
         // Register USB receiver
         val filter = IntentFilter()
+        Log.d("USB_DEBUG", "onCreate() started - Register USB reciever")
         filter.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
         filter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
-        registerReceiver(usbReceiver, filter)
+        registerReceiver(
+            usbReceiver,
+            IntentFilter("USB_PERMISSION"),
+            RECEIVER_NOT_EXPORTED
+        )
 
         // Check for already connected device
         connectToUsbDevice()
     }
 
     private fun loadModelFile(filename: String): MappedByteBuffer {
+        Log.d("USB_DEBUG", "onCreate() started - send Homing 1")
         val fileDescriptor = assets.openFd(filename)
         val inputStream = FileInputStream(fileDescriptor.fileDescriptor)
         val channel = inputStream.channel
@@ -336,7 +371,105 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
+    private fun connectToUsbDevice() {
+        Log.d("USB_SERIAL", "Trying to connect...")
+        val availableDrivers = UsbSerialProber.getDefaultProber().findAllDrivers(usbManager)
+        if (availableDrivers.isEmpty()) {
+            Log.e("USB_SERIAL", "No drivers found!")
+            Toast.makeText(this, "No USB device found", Toast.LENGTH_SHORT).show()
+            return
+        }
 
+        val driver = availableDrivers[0]
+        Log.d("USB_SERIAL", "Found driver: ${driver.device.deviceName}")
+
+        val connection = usbManager.openDevice(driver.device) ?: run {
+            Log.w("USB_SERIAL", "Cannot open device - requesting permission")
+            // Request permission if needed
+            val permissionIntent = PendingIntent.getBroadcast(this, 0, Intent("USB_PERMISSION"), PendingIntent.FLAG_IMMUTABLE)
+            usbManager.requestPermission(driver.device, permissionIntent)
+            Toast.makeText(this, "Requesting USB permission", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        usbSerialPort = driver.ports[0]
+        Log.d("USB_SERIAL", "Port opened: ${usbSerialPort != null}")
+
+
+        try {
+            usbSerialPort = driver.ports[0]
+            usbSerialPort!!.open(connection)
+            usbSerialPort!!.setParameters(
+                115200,
+                8,
+                UsbSerialPort.STOPBITS_1,
+                UsbSerialPort.PARITY_NONE
+            )
+            startSerialReading()
+            Log.d("USB_SERIAL", "Port configured at 115200 baud")
+            Toast.makeText(this, "USB connected", Toast.LENGTH_SHORT).show()
+        } catch (e: IOException) {
+            Log.e("USB_SERIAL", "Open/config failed: ${e.message}")
+            Toast.makeText(this, "Error opening USB: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+    private fun startSerialReading() {
+        readThread = Thread {
+            val buffer = ByteArray(1024)
+
+            while (!Thread.currentThread().isInterrupted) {
+                try {
+                    val len = usbSerialPort?.read(buffer, 1000) ?: -1
+
+                    if (len > 0) {
+                        val text = String(buffer, 0, len)
+                        runOnUiThread {
+                            serialOutputText.append(text)
+                        }
+                    }
+
+                } catch (e: IOException) {
+                    Log.e("USB_SERIAL", "Read failed", e)
+                    break
+                }
+            }
+        }
+        readThread!!.start()
+    }
+
+
+
+    private fun openSerialPort(device: UsbDevice) {
+        val driver = UsbSerialProber.getDefaultProber().probeDevice(device)
+            ?: run {
+                Log.e("USB_SERIAL", "No driver for device")
+                return
+            }
+
+        val connection = usbManager.openDevice(device)
+            ?: run {
+                Log.e("USB_SERIAL", "Cannot open device")
+                return
+            }
+
+        usbSerialPort = driver.ports[0]
+
+        try {
+            usbSerialPort!!.open(connection)
+            usbSerialPort!!.setParameters(
+                115200,
+                8,
+                UsbSerialPort.STOPBITS_1,
+                UsbSerialPort.PARITY_NONE
+            )
+
+            Log.d("USB_SERIAL", "Serial port opened")
+            startSerialReading()
+
+        } catch (e: IOException) {
+            Log.e("USB_SERIAL", "Open/config failed", e)
+        }
+    }
     // Called only when permission is granted
     private fun startCameraIfReady() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
@@ -713,66 +846,9 @@ class MainActivity : AppCompatActivity() {
     }
 
 
-    private fun connectToUsbDevice() {
-        val availableDrivers = UsbSerialProber.getDefaultProber().findAllDrivers(usbManager)
-        if (availableDrivers.isEmpty()) {
-            Toast.makeText(this, "No USB device found", Toast.LENGTH_SHORT).show()
-            return
-        }
 
-        val driver = availableDrivers[0]
-        val connection = usbManager.openDevice(driver.device) ?: run {
-            // Request permission if needed
-            val permissionIntent = PendingIntent.getBroadcast(this, 0, Intent("USB_PERMISSION"), PendingIntent.FLAG_IMMUTABLE)
-            usbManager.requestPermission(driver.device, permissionIntent)
-            Toast.makeText(this, "Requesting USB permission", Toast.LENGTH_SHORT).show()
-            return
-        }
 
-        usbSerialPort = driver.ports[0]
-        try {
-            usbSerialPort?.open(connection)
-            usbSerialPort?.setParameters(115200, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
-            Toast.makeText(this, "Connected to ESP32-S3", Toast.LENGTH_SHORT).show()
-        } catch (e: IOException) {
-            Toast.makeText(this, "Error opening USB: ${e.message}", Toast.LENGTH_SHORT).show()
-        }
-        try {
-            usbSerialPort?.open(connection)
-            usbSerialPort?.setParameters(115200, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
-            Toast.makeText(this, "Connected to ESP32-S3", Toast.LENGTH_SHORT).show()
 
-            // Start background thread to read incoming data
-            startSerialReading()
-        } catch (e: IOException) {
-            Toast.makeText(this, "Error opening USB: ${e.message}", Toast.LENGTH_SHORT).show()
-        }
-    }
-    private fun startSerialReading() {
-        readThread = Thread {
-            val buffer = ByteArray(1024)
-            while (!Thread.currentThread().isInterrupted) {
-                try {
-                    val len = usbSerialPort?.read(buffer, 1000) ?: 0
-                    if (len > 0) {
-                        val received = String(buffer, 0, len)
-                        runOnUiThread {
-                            // Append received data to the text box
-                            val currentText = serialOutputText.text.toString()
-                            serialOutputText.text = "$currentText\n$received"
-                            // Auto-scroll to bottom
-                            val scrollView = serialOutputText.parent as ScrollView
-                            scrollView.post { scrollView.fullScroll(ScrollView.FOCUS_DOWN) }
-                        }
-                    }
-                } catch (e: IOException) {
-                    // Connection closed or error → stop thread
-                    break
-                }
-            }
-        }
-        readThread?.start()
-    }
 
     private fun disconnectUsb() {
         readThread?.interrupt()

@@ -1,4 +1,4 @@
-package com.example.objecttrackerapp
+package com.example.esp32controller
 
 import android.content.Context
 import android.graphics.Canvas
