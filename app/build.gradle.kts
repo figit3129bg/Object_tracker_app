@@ -63,6 +63,9 @@ dependencies {
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
 
 
+
+    implementation("io.github.webrtc-sdk:android:137.7151.05")
+
     // CameraX
     implementation("androidx.camera:camera-core:1.3.3")
     implementation("androidx.camera:camera-camera2:1.3.3")

@@ -134,6 +134,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tiltValueText: TextView
 
 
+
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action == "USB_PERMISSION") {
@@ -280,7 +281,7 @@ class MainActivity : AppCompatActivity() {
         panSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 panValueText.text = "Pan: $progress"
-                sendCommand("PAN:$progress\n")
+                sendCommand("Pan:$progress\n")
             }
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
             override fun onStopTrackingTouch(seekBar: SeekBar?) {}
@@ -289,7 +290,7 @@ class MainActivity : AppCompatActivity() {
         tiltSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 tiltValueText.text = "Tilt: $progress"
-                sendCommand("TILT:$progress\n")
+                sendCommand("Tilt:$progress\n")
             }
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
             override fun onStopTrackingTouch(seekBar: SeekBar?) {}
