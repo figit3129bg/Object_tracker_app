@@ -16,7 +16,6 @@ import java.util.concurrent.ExecutorService
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.RectF
-//import android.util.Log
 import androidx.camera.core.ImageAnalysis
 import android.util.Size
 import androidx.camera.core.Preview
@@ -32,12 +31,6 @@ import java.nio.channels.FileChannel
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import androidx.camera.core.CameraInfo
-//import fi.iki.elonen.NanoWSD
-//import fi.iki.elonen.NanoWSD.WebSocket
-//import android.net.wifi.WifiManager
-//import android.text.format.Formatter
-
-
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -52,25 +45,46 @@ import androidx.appcompat.app.AppCompatActivity
 import com.hoho.android.usbserial.driver.UsbSerialPort
 import com.hoho.android.usbserial.driver.UsbSerialProber
 import java.io.IOException
-//import com.example.esp32controller.R
-import android.widget.ScrollView   // For ScrollView class
-//import android.view.View
+import android.widget.ScrollView
 import android.widget.Button
 import com.example.esp32controller.OverlayView
-
-
-import android.content.*
 import android.hardware.usb.*
 import com.hoho.android.usbserial.driver.*
 import java.text.SimpleDateFormat
 import java.util.*
 import kotlin.concurrent.thread
+import kotlin.math.abs
+import android.os.Handler
+import android.os.Looper
 
 
 class MainActivity : AppCompatActivity() {
 
-    // things for object tracking
+    // Tracking state
+    private var isTracking = false
+    private var trackedBox: RectF? = null
+    private var lastTrackedTime: Long = 0
+    private val TRACKING_TIMEOUT_MS = 300L // Time before giving up on lost object
+    private val TRACKING_SIMILARITY_THRESHOLD = 100f // Pixel distance to consider same object
+    private val CENTER_DEADZONE = 0.08f
 
+
+    // Smooth movement control
+    private var targetPanValue = 500
+    private var targetTiltValue = 500
+    private var currentPanValue = 500
+    private var currentTiltValue = 500
+    private val smoothingFactor = 0.75f // Lower = smoother but slower response
+    private val handler = Handler(Looper.getMainLooper())
+    private var smoothMovementRunnable: Runnable? = null
+
+    // PID-like control for centering
+    private var lastPanError = 0f
+    private var lastTiltError = 0f
+    private val kP = 3.5f // Proportional gain
+    private val kD = 0.8f // Derivative gain (for smoothing)
+
+    // things for object tracking
     private lateinit var cameraExecutor: ExecutorService
     private lateinit var overlay: OverlayView
     private lateinit var tflite: Interpreter
@@ -97,24 +111,19 @@ class MainActivity : AppCompatActivity() {
         "tv", "laptop", "mouse", "remote", "keyboard", "cell phone",
         "microwave", "oven", "toaster", "sink", "refrigerator", "book",
         "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush"
-
-
     )
 
     // Set to store which class indices are currently active
-    private val selectedClasses = mutableSetOf<Int>() // e.g., initially empty or default to all
+    private val selectedClasses = mutableSetOf<Int>()
 
     private val requestPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
             if (isGranted) {
-                // Permission granted — start camera
-               startCameraIfReady()
+                startCameraIfReady()
             } else {
-                // Permission denied — show rationale or direct to settings
                 if (shouldShowRequestPermissionRationale(Manifest.permission.CAMERA)) {
-                   showPermissionRationaleDialog()
+                    showPermissionRationaleDialog()
                 } else {
-                    // User permanently denied (Don't ask again) — guide them to settings
                     showGoToSettingsDialog()
                 }
             }
@@ -132,8 +141,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tiltSeekBar: SeekBar
     private lateinit var panValueText: TextView
     private lateinit var tiltValueText: TextView
-
-
+    private lateinit var trackingButton: Button
+    private lateinit var trackingStatusText: TextView
 
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -154,18 +163,14 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Log.d("USB_DEBUG", "onCreate() started - app is launching")
 
-
         cameraExecutor = Executors.newSingleThreadExecutor()
 
         val sharedPrefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-        // Load saved confidence, default to 0.35
         confidenceThreshold = sharedPrefs.getFloat(KEY_CONFIDENCE, 0.35f)
-        // Load saved zoom, default to 0f (slider 0%)
         val savedZoom = sharedPrefs.getFloat(KEY_ZOOM, 0f)
         Log.d("USB_DEBUG", "onCreate() started - loading saved preferences")
         setContentView(R.layout.activity_main)
@@ -177,25 +182,49 @@ class MainActivity : AppCompatActivity() {
         panValueText = findViewById(R.id.pan_value)
         tiltValueText = findViewById(R.id.tilt_value)
         serialOutputText = findViewById(R.id.serial_output)
-
         overlay = findViewById(R.id.overlay)
+        trackingButton = findViewById(R.id.tracking_button)
+        trackingStatusText = findViewById(R.id.tracking_status)
 
         panSeekBar.max = 1000
         tiltSeekBar.max = 1000
         panSeekBar.progress = 500
         tiltSeekBar.progress = 500
 
-
         Log.d("USB_DEBUG", "onCreate() started - loading layout")
+
+        // Tracking button setup
+        trackingButton.setOnClickListener {
+            isTracking = !isTracking
+            if (isTracking) {
+                trackingButton.text = "Stop Tracking"
+                trackingStatusText.text = "Status: Waiting for object..."
+                trackingStatusText.setTextColor(android.graphics.Color.YELLOW)
+                startSmoothMovement()
+            } else {
+                trackingButton.text = "Start Tracking"
+                trackingStatusText.text = "Status: Inactive"
+                trackingStatusText.setTextColor(android.graphics.Color.GRAY)
+                trackedBox = null
+                stopSmoothMovement()
+                // Reset everything to 500 (stop) and send immediately
+                targetPanValue = 500
+                targetTiltValue = 500
+                currentPanValue = 500
+                currentTiltValue = 500
+                lastPanError = 0f
+                lastTiltError = 0f
+                sendCommand("Pan:500\n")
+                sendCommand("Tilt:500\n")
+            }
+        }
 
         val tiltHomingButton: Button = findViewById(R.id.tilt_homing_Button)
         val panHomingButton: Button = findViewById(R.id.pan_homing_Button)
         val bothHomingButton: Button = findViewById(R.id.pan_tilt_homing_Button)
-        // slider setup
+
         val confidenceSlider = findViewById<SeekBar>(R.id.confidenceSlider)
         val confidenceText = findViewById<TextView>(R.id.confidenceText)
-        confidenceSlider.progress = ((confidenceThreshold - 0.25f) * 100).toInt()
-        confidenceText.text = "Confidence: %.2f".format(confidenceThreshold)
         confidenceSlider.progress = ((confidenceThreshold - 0.25f) * 100).toInt()
         confidenceText.text = "Confidence: %.2f".format(confidenceThreshold)
 
@@ -205,33 +234,24 @@ class MainActivity : AppCompatActivity() {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 confidenceThreshold = 0.25f + (progress / 100f)
                 confidenceText.text = "Confidence: %.2f".format(confidenceThreshold)
-                Log.d("USB_DEBUG", "onCreate() started - send confidence")
-                // Save
                 sharedPrefs.edit().putFloat(KEY_CONFIDENCE, confidenceThreshold).apply()
             }
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
             override fun onStopTrackingTouch(seekBar: SeekBar?) {}
         })
 
-
         val zoomSlider = findViewById<SeekBar>(R.id.zoomSlider)
-
-
         zoomSlider.progress = (savedZoom * 100).toInt()
 
         zoomSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                // Map progress 0..100 to linear zoom 0.0..1.0
                 val zoomValue = progress / 100f
                 cameraControl?.setLinearZoom(zoomValue)
-                // Save
                 sharedPrefs.edit().putFloat(KEY_ZOOM, progress / 100f).apply()
             }
-
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
             override fun onStopTrackingTouch(seekBar: SeekBar?) {}
         })
-
 
         val selectButton = findViewById<Button>(R.id.selectClassesButton)
         Log.d("USB_DEBUG", "onCreate() started - loading tracking object button")
@@ -250,38 +270,35 @@ class MainActivity : AppCompatActivity() {
                 .setPositiveButton("OK", null)
                 .show()
         }
-        Log.d("USB_DEBUG", "onCreate() started - ended loading tracking object button")
+
         val options = Interpreter.Options().apply {
-            setNumThreads(6)
+            setNumThreads(4)
         }
         tflite = Interpreter(loadModelFile("detect.tflite"), options)
         checkCameraPermissionAndStart()
 
-
-
         Log.d("USB_DEBUG", "onCreate() started - buttons for homing")
         tiltHomingButton.setOnClickListener {
             sendCommand("Homing:1\n")
-            Log.d("USB_DEBUG", "onCreate() started - send Homing 1")
             Toast.makeText(this, "Tilt Homing sent", Toast.LENGTH_SHORT).show()
         }
 
         panHomingButton.setOnClickListener {
             sendCommand("Homing:2\n")
-            Log.d("USB_DEBUG", "onCreate() started - send Homing 2")
             Toast.makeText(this, "Pan Homing sent", Toast.LENGTH_SHORT).show()
         }
 
         bothHomingButton.setOnClickListener {
             sendCommand("Homing:3\n")
-            Log.d("USB_DEBUG", "onCreate() started - send Homing 3")
             Toast.makeText(this, "Both Homing sent", Toast.LENGTH_SHORT).show()
         }
 
         panSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                panValueText.text = "Pan: $progress"
-                sendCommand("Pan:$progress\n")
+                if (!isTracking) { // Only allow manual control when not tracking
+                    panValueText.text = "Pan: $progress"
+                    sendCommand("Pan:$progress\n")
+                }
             }
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
             override fun onStopTrackingTouch(seekBar: SeekBar?) {}
@@ -289,16 +306,17 @@ class MainActivity : AppCompatActivity() {
 
         tiltSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                tiltValueText.text = "Tilt: $progress"
-                sendCommand("Tilt:$progress\n")
+                if (!isTracking) { // Only allow manual control when not tracking
+                    tiltValueText.text = "Tilt: $progress"
+                    sendCommand("Tilt:$progress\n")
+                }
             }
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
             override fun onStopTrackingTouch(seekBar: SeekBar?) {}
         })
 
-        // Register USB receiver
         val filter = IntentFilter()
-        Log.d("USB_DEBUG", "onCreate() started - Register USB reciever")
+        Log.d("USB_DEBUG", "onCreate() started - Register USB receiver")
         filter.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
         filter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
         registerReceiver(
@@ -307,12 +325,178 @@ class MainActivity : AppCompatActivity() {
             RECEIVER_NOT_EXPORTED
         )
 
-        // Check for already connected device
         connectToUsbDevice()
     }
 
+    private fun startSmoothMovement() {
+        smoothMovementRunnable = object : Runnable {
+            override fun run() {
+                if (isTracking) {
+                    // Smoothly interpolate current values toward target
+                    currentPanValue += ((targetPanValue - currentPanValue) * smoothingFactor).toInt()
+                    currentTiltValue += ((targetTiltValue - currentTiltValue) * smoothingFactor).toInt()
+
+                    // Update UI
+                    panValueText.text = "Pan: $currentPanValue"
+                    tiltValueText.text = "Tilt: $currentTiltValue"
+                    panSeekBar.progress = currentPanValue
+                    tiltSeekBar.progress = currentTiltValue
+
+                    // Send to ESP32
+                    sendCommand("Pan:$currentPanValue\n")
+                    sendCommand("Tilt:$currentTiltValue\n")
+
+                    // Schedule next update (20ms = 50Hz update rate)
+                    handler.postDelayed(this, 20)
+                }
+            }
+        }
+        handler.post(smoothMovementRunnable!!)
+    }
+
+    private fun stopSmoothMovement() {
+        smoothMovementRunnable?.let {
+            handler.removeCallbacks(it)
+        }
+    }
+
+    private fun updateTracking(detections: List<DetectionResult>) {
+        if (!isTracking) return
+
+        val currentTime = System.currentTimeMillis()
+
+        // Find center of screen
+        val screenCenterX = overlay.width / 2f
+        val screenCenterY = overlay.height / 2f
+
+        var bestMatch: DetectionResult? = null
+        var bestDistance = Float.MAX_VALUE
+
+        // If we have a tracked box, look for similar box
+        if (trackedBox != null && (currentTime - lastTrackedTime) < TRACKING_TIMEOUT_MS) {
+            val trackedCenterX = trackedBox!!.centerX()
+            val trackedCenterY = trackedBox!!.centerY()
+
+            for (detection in detections) {
+                val detBox = RectF(
+                    detection.left * overlay.width,
+                    detection.top * overlay.height,
+                    detection.right * overlay.width,
+                    detection.bottom * overlay.height
+                )
+
+                val distance = calculateDistance(
+                    trackedCenterX, trackedCenterY,
+                    detBox.centerX(), detBox.centerY()
+                )
+
+                if (distance < TRACKING_SIMILARITY_THRESHOLD && distance < bestDistance) {
+                    bestDistance = distance
+                    bestMatch = detection
+                }
+            }
+        } else {
+            // No current track - find box closest to center of screen
+            for (detection in detections) {
+                val detBox = RectF(
+                    detection.left * overlay.width,
+                    detection.top * overlay.height,
+                    detection.right * overlay.width,
+                    detection.bottom * overlay.height
+                )
+
+                val distance = calculateDistance(
+                    screenCenterX, screenCenterY,
+                    detBox.centerX(), detBox.centerY()
+                )
+
+                if (distance < bestDistance) {
+                    bestDistance = distance
+                    bestMatch = detection
+                }
+            }
+        }
+
+        if (bestMatch != null) {
+            // Update tracked box
+            trackedBox = RectF(
+                bestMatch.left * overlay.width,
+                bestMatch.top * overlay.height,
+                bestMatch.right * overlay.width,
+                bestMatch.bottom * overlay.height
+            )
+            lastTrackedTime = currentTime
+
+            // Calculate error as normalised -1..+1 relative to screen size
+            val boxCenterX = trackedBox!!.centerX()
+            val boxCenterY = trackedBox!!.centerY()
+
+            // panError:  positive = object is RIGHT of center
+            // tiltError: positive = object is BELOW center
+            var panError  = (boxCenterX - screenCenterX) / screenCenterX
+            var tiltError = (boxCenterY - screenCenterY) / screenCenterY
+
+                // ---------- DEAD ZONE ----------
+            // If object is close enough to center → STOP motors
+            if (abs(panError) < CENTER_DEADZONE) {
+                panError = 0f
+            }
+            if (abs(tiltError) < CENTER_DEADZONE) {
+                tiltError = 0f
+            }
+            // If fully inside dead zone → hard stop
+            if (panError == 0f && tiltError == 0f) {
+                targetPanValue = 500
+                targetTiltValue = 500
+                lastPanError = 0f
+                lastTiltError = 0f
+                return
+            }
+
+            val panCorrection  = kP * panError  + kD * (panError  - lastPanError)
+            val tiltCorrection = kP * tiltError + kD * (tiltError - lastTiltError)
+
+            lastPanError  = panError
+            lastTiltError = tiltError
+
+            // ESP32 is a SPEED STICK: 500 = stop, >500 = move, <500 = move opposite.
+            // Max stick range we allow is ±250 around 500 (so 250..750).
+            //
+            // Pan:  object RIGHT (panError>0) → need to pan RIGHT → send >500  → 500 + correction
+            // Tilt: object BELOW (tiltError>0) → need to tilt DOWN → but ESP32
+            //       delta>0 means UP, so DOWN = <500  → 500 - correction
+            val maxStick = 250f
+            targetPanValue  = (500f + panCorrection  * maxStick).toInt().coerceIn(250, 750)
+            targetTiltValue = (500f + tiltCorrection * maxStick).toInt().coerceIn(250, 750)
+
+            // Update status
+            val className = if (bestMatch.classIndex in classNames.indices)
+                classNames[bestMatch.classIndex] else "?"
+            trackingStatusText.text = "Tracking: $className (${String.format("%.0f", bestMatch.score * 100)}%)"
+            trackingStatusText.setTextColor(android.graphics.Color.GREEN)
+
+            Log.d("TRACKING", "Error: Pan=$panError, Tilt=$tiltError | Target: Pan=$targetPanValue, Tilt=$targetTiltValue")
+
+        } else if ((currentTime - lastTrackedTime) > TRACKING_TIMEOUT_MS) {
+            // Lost track — tell the motors to stop
+            trackedBox = null
+            targetPanValue = 500
+            targetTiltValue = 500
+            lastPanError = 0f
+            lastTiltError = 0f
+            trackingStatusText.text = "Status: Searching..."
+            trackingStatusText.setTextColor(android.graphics.Color.YELLOW)
+            Log.d("TRACKING", "Lost object - searching")
+        }
+    }
+
+    private fun calculateDistance(x1: Float, y1: Float, x2: Float, y2: Float): Float {
+        val dx = x2 - x1
+        val dy = y2 - y1
+        return kotlin.math.sqrt(dx * dx + dy * dy)
+    }
+
     private fun loadModelFile(filename: String): MappedByteBuffer {
-        Log.d("USB_DEBUG", "onCreate() started - send Homing 1")
         val fileDescriptor = assets.openFd(filename)
         val inputStream = FileInputStream(fileDescriptor.fileDescriptor)
         val channel = inputStream.channel
@@ -321,32 +505,29 @@ class MainActivity : AppCompatActivity() {
         return channel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength)
     }
 
-
     override fun onDestroy() {
         super.onDestroy()
+        stopSmoothMovement()
         unregisterReceiver(usbReceiver)
         disconnectUsb()
         cameraExecutor.shutdown()
     }
+
     private fun checkCameraPermissionAndStart() {
         when {
             ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
                     == PackageManager.PERMISSION_GRANTED -> {
-                // Already granted
                 startCameraIfReady()
             }
-
             shouldShowRequestPermissionRationale(Manifest.permission.CAMERA) -> {
-                // Show an in-app rationale before requesting permission again
                 showPermissionRationaleDialog()
             }
-
             else -> {
-                // Directly request permission (first time)
                 requestPermissionLauncher.launch(Manifest.permission.CAMERA)
             }
         }
     }
+
     private fun showPermissionRationaleDialog() {
         AlertDialog.Builder(this)
             .setTitle("Camera required")
@@ -386,7 +567,6 @@ class MainActivity : AppCompatActivity() {
 
         val connection = usbManager.openDevice(driver.device) ?: run {
             Log.w("USB_SERIAL", "Cannot open device - requesting permission")
-            // Request permission if needed
             val permissionIntent = PendingIntent.getBroadcast(this, 0, Intent("USB_PERMISSION"), PendingIntent.FLAG_IMMUTABLE)
             usbManager.requestPermission(driver.device, permissionIntent)
             Toast.makeText(this, "Requesting USB permission", Toast.LENGTH_SHORT).show()
@@ -395,7 +575,6 @@ class MainActivity : AppCompatActivity() {
 
         usbSerialPort = driver.ports[0]
         Log.d("USB_SERIAL", "Port opened: ${usbSerialPort != null}")
-
 
         try {
             usbSerialPort = driver.ports[0]
@@ -414,6 +593,7 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "Error opening USB: ${e.message}", Toast.LENGTH_SHORT).show()
         }
     }
+
     private fun startSerialReading() {
         readThread = Thread {
             val buffer = ByteArray(1024)
@@ -437,8 +617,6 @@ class MainActivity : AppCompatActivity() {
         }
         readThread!!.start()
     }
-
-
 
     private fun openSerialPort(device: UsbDevice) {
         val driver = UsbSerialProber.getDefaultProber().probeDevice(device)
@@ -471,38 +649,28 @@ class MainActivity : AppCompatActivity() {
             Log.e("USB_SERIAL", "Open/config failed", e)
         }
     }
-    // Called only when permission is granted
+
     private fun startCameraIfReady() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
 
         cameraProviderFuture.addListener({
             val cameraProvider = cameraProviderFuture.get()
 
-            // Build Preview
             val preview = Preview.Builder()
                 .build()
                 .also {
                     it.setSurfaceProvider(findViewById<PreviewView>(R.id.previewView).surfaceProvider)
                 }
 
-            // Build ImageAnalysis
             val imageAnalyzer = ImageAnalysis.Builder()
-                .setTargetResolution(Size(300, 300)) // must match your model input
+                .setTargetResolution(Size(300, 300))
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .build()
 
-
-
-
-
-            // Set analyzer
             imageAnalyzer.setAnalyzer(cameraExecutor) { imageProxy ->
-
-
                 try {
                     var bitmap = imageProxy.toBitmap()
 
-                    // Rotate bitmap if needed
                     val rotationDegrees = imageProxy.imageInfo.rotationDegrees
                     if (rotationDegrees != 0) {
                         val matrix = android.graphics.Matrix()
@@ -518,10 +686,8 @@ class MainActivity : AppCompatActivity() {
                         )
                     }
 
-                    // Run object detection
                     val detections = runModel(bitmap)
 
-                    // Filter detections by confidence + selected classes
                     val filtered = if (selectedClasses.isEmpty()) {
                         detections.filter { it.score >= confidenceThreshold }
                     } else {
@@ -532,7 +698,9 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
 
-                    // FPS calculation
+                    // Update tracking logic
+                    updateTracking(filtered)
+
                     val currentTime = System.currentTimeMillis()
                     val delta = currentTime - lastFrameTime
                     if (delta > 0) {
@@ -540,7 +708,6 @@ class MainActivity : AppCompatActivity() {
                     }
                     lastFrameTime = currentTime
 
-                    // Draw overlay
                     overlay.post {
                         if (overlay.width == 0 || overlay.height == 0) return@post
 
@@ -564,40 +731,20 @@ class MainActivity : AppCompatActivity() {
 
                         val classes = filtered.map { it.classIndex }
 
-                        //  send rects, labels, fps, and classes
-                        overlay.setBoxes(rects, labels, classes, fps)
-
-
-                        /*        val currentTime = System.currentTimeMillis()
-                    if (detections.isNotEmpty() && currentTime - lastLogTime >= 1000) { // 1000 ms = 1 sec
-                        val d = detections[0]
-                        Log.d(
-                            "DEBUG_DET",
-                            "norm: ${d.left},${d.top},${d.right},${d.bottom}  " +
-                                    "scaled: ${d.left*overlay.width},${d.top*overlay.height}"
-                        )
-                        lastLogTime = currentTime
-                    }
-
-                    */
-
+                        overlay.setBoxes(rects, labels, classes, fps, trackedBox)
                     }
                 } catch (e: Exception) {
                     e.printStackTrace()
                 } finally {
                     imageProxy.close()
                 }
-
             }
 
-            // Camera selector
             val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
 
             try {
-                // Unbind previous use cases
                 cameraProvider.unbindAll()
 
-                // Bind preview + analyzer once
                 val camera = cameraProvider.bindToLifecycle(
                     this,
                     cameraSelector,
@@ -605,7 +752,6 @@ class MainActivity : AppCompatActivity() {
                     imageAnalyzer
                 )
 
-                // Store CameraControl and CameraInfo for zoom
                 cameraControl = camera.cameraControl
                 cameraInfo = camera.cameraInfo
                 maxZoomRatio = cameraInfo?.zoomState?.value?.maxZoomRatio ?: 1f
@@ -617,17 +763,11 @@ class MainActivity : AppCompatActivity() {
 
         }, ContextCompat.getMainExecutor(this))
     }
-    private fun analyzeImageProxy(imageProxy: ImageProxy) {
-        val bitmap = imageProxy.toBitmap()  // <-- converts frame to Bitmap
-        // Next step: send this bitmap to TFLite model
-        processImage(bitmap)
-        imageProxy.close()                  // important: release the frame
-    }
 
-    private fun ImageProxy. toBitmap(): Bitmap {
-        val yBuffer = planes[0].buffer // Y
-        val uBuffer = planes[1].buffer // U
-        val vBuffer = planes[2].buffer // V
+    private fun ImageProxy.toBitmap(): Bitmap {
+        val yBuffer = planes[0].buffer
+        val uBuffer = planes[1].buffer
+        val vBuffer = planes[2].buffer
 
         val ySize = yBuffer.remaining()
         val uSize = uBuffer.remaining()
@@ -646,47 +786,6 @@ class MainActivity : AppCompatActivity() {
         return BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
     }
 
-    fun bitmapToByteBuffer(bitmap: Bitmap): ByteBuffer {
-        val inputSize = 300
-        val inputBuffer = ByteBuffer.allocateDirect(1 * inputSize * inputSize * 3 * 4) // 4 bytes per float
-        inputBuffer.order(ByteOrder.nativeOrder())
-
-        val resizedBitmap = Bitmap.createScaledBitmap(bitmap, inputSize, inputSize, true)
-        val intValues = IntArray(inputSize * inputSize)
-        resizedBitmap.getPixels(intValues, 0, inputSize, 0, 0, inputSize, inputSize)
-
-        var pixelIndex = 0
-        for (i in 0 until inputSize) {
-            for (j in 0 until inputSize) {
-                val pixel = intValues[pixelIndex++]
-                // Convert from ARGB to RGB and normalize
-                inputBuffer.putFloat(((pixel shr 16 and 0xFF) / 255f)) // R
-                inputBuffer.putFloat(((pixel shr 8 and 0xFF) / 255f))  // G
-                inputBuffer.putFloat(((pixel and 0xFF) / 255f))        // B
-            }
-        }
-        inputBuffer.rewind()
-        return inputBuffer
-    }
-
-    fun processImage(bitmap: Bitmap) {
-        // Run the TFLite model
-        val results = runModel(bitmap)
-
-        // Convert results to RectF objects
-        val detectedBoxes = mutableListOf<RectF>()
-        for (result in results) {
-            val left = result.left
-            val top = result.top
-            val right = result.right
-            val bottom = result.bottom
-            detectedBoxes.add(RectF(left, top, right, bottom))
-        }
-
-        //  Send boxes to the overlay
-        overlay.setBoxes(detectedBoxes)
-    }
-
     data class DetectionResult(
         val left: Float,
         val top: Float,
@@ -695,8 +794,8 @@ class MainActivity : AppCompatActivity() {
         val classIndex: Int,
         val score: Float
     )
-    fun runModel(bitmap: Bitmap): List<com.example.esp32controller.MainActivity.DetectionResult> {
-        // Model input: we assume model expects 300x300 RGB uint8
+
+    fun runModel(bitmap: Bitmap): List<DetectionResult> {
         val inputBitmap = Bitmap.createScaledBitmap(bitmap, 300, 300, true)
 
         val inputBuffer = ByteBuffer.allocateDirect(300 * 300 * 3)
@@ -706,15 +805,14 @@ class MainActivity : AppCompatActivity() {
         for (y in 0 until 300) {
             for (x in 0 until 300) {
                 val pixel = inputBitmap.getPixel(x, y)
-                inputBuffer.put((pixel shr 16 and 0xFF).toByte()) // R
-                inputBuffer.put((pixel shr 8 and 0xFF).toByte())  // G
-                inputBuffer.put((pixel and 0xFF).toByte())        // B
+                inputBuffer.put((pixel shr 16 and 0xFF).toByte())
+                inputBuffer.put((pixel shr 8 and 0xFF).toByte())
+                inputBuffer.put((pixel and 0xFF).toByte())
             }
         }
         inputBuffer.rewind()
 
-        // Prepare outputs (as before)
-        val outputLocations = Array(1) { Array(10) { FloatArray(4) } } // normalized: [ymin, xmin, ymax, xmax]
+        val outputLocations = Array(1) { Array(10) { FloatArray(4) } }
         val outputClasses = Array(1) { FloatArray(10) }
         val outputScores = Array(1) { FloatArray(10) }
         val numDetections = FloatArray(1)
@@ -726,26 +824,24 @@ class MainActivity : AppCompatActivity() {
             3 to numDetections
         )
 
-        // Run interpreter
         tflite.runForMultipleInputsOutputs(arrayOf(inputBuffer), outputMap)
 
-        // Convert outputs to normalized DetectionResult (values 0..1)
-        val results = mutableListOf<com.example.esp32controller.MainActivity.DetectionResult>()
+        val results = mutableListOf<DetectionResult>()
         val count = numDetections[0].toInt().coerceAtMost(10)
 
         for (i in 0 until count) {
             val score = outputScores[0][i]
-            if (score < confidenceThreshold ) continue
+            if (score < confidenceThreshold) continue
 
-            val ymin = outputLocations[0][i][0]     // normalized
-            val xmin = outputLocations[0][i][1]     // normalized
-            val ymax = outputLocations[0][i][2]     // normalized
-            val xmax = outputLocations[0][i][3]     // normalized
+            val ymin = outputLocations[0][i][0]
+            val xmin = outputLocations[0][i][1]
+            val ymax = outputLocations[0][i][2]
+            val xmax = outputLocations[0][i][3]
 
             results.add(
                 DetectionResult(
-                    left = xmin,   // normalized x
-                    top = ymin,    // normalized y
+                    left = xmin,
+                    top = ymin,
                     right = xmax,
                     bottom = ymax,
                     classIndex = outputClasses[0][i].toInt(),
@@ -757,100 +853,6 @@ class MainActivity : AppCompatActivity() {
         return results
     }
 
-    private fun scaleDetectionsToOverlay(
-        detections: List<com.example.esp32controller.MainActivity.DetectionResult>,
-        overlay: OverlayView,
-        originalBitmapWidth: Int,
-        originalBitmapHeight: Int
-    ): List<RectF> {
-        return detections.map { detection ->
-            val scaledLeft = detection.left * overlay.width.toFloat() / originalBitmapWidth
-            val scaledTop = detection.top * overlay.height.toFloat() / originalBitmapHeight
-            val scaledRight = detection.right * overlay.width.toFloat() / originalBitmapWidth
-            val scaledBottom = detection.bottom * overlay.height.toFloat() / originalBitmapHeight
-
-            // Clamp to overlay bounds (prevents boxes going off-screen)
-            RectF(
-                scaledLeft.coerceIn(0f, overlay.width.toFloat()),
-                scaledTop.coerceIn(0f, overlay.height.toFloat()),
-                scaledRight.coerceIn(0f, overlay.width.toFloat()),
-                scaledBottom.coerceIn(0f, overlay.height.toFloat())
-            )
-        }
-    }
-
-    private fun runObjectDetection(bitmap: Bitmap) {
-        val input = bitmapToByteBuffer(bitmap)
-
-        // Output arrays (SSD MobileNet V2 typical output)
-        val locations = Array(1) { Array(10) { FloatArray(4) } } // 10 boxes, each 4 floats
-        val classes = Array(1) { FloatArray(10) } // 10 classes
-        val scores = Array(1) { FloatArray(10) } // 10 scores
-        val numDetections = FloatArray(1)
-
-        val outputMap = mapOf(
-            0 to locations,
-            1 to classes,
-            2 to scores,
-            3 to numDetections
-        )
-
-        tflite.runForMultipleInputsOutputs(arrayOf(input), outputMap)
-
-        // Convert results to RectF and send to overlay
-        val detectedBoxes = mutableListOf<RectF>()
-        val num = numDetections[0].toInt()
-        for (i in 0 until num) {
-            val box = locations[0][i]
-            val left = box[1] * overlay.width
-            val top = box[0] * overlay.height
-            val right = box[3] * overlay.width
-            val bottom = box[2] * overlay.height
-            detectedBoxes.add(RectF(left, top, right, bottom))
-        }
-
-    }
-
-    fun Bitmap.resizeToModel(): Bitmap {
-        return Bitmap.createScaledBitmap(this, 300, 300, true)
-    }
-
-    private fun startCamera() {
-        val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
-        cameraProviderFuture.addListener({
-            val cameraProvider = cameraProviderFuture.get()
-
-            val preview = Preview.Builder().build().also {
-                it.setSurfaceProvider(findViewById<PreviewView>(R.id.previewView).surfaceProvider)
-            }
-
-            val imageAnalysis = ImageAnalysis.Builder()
-                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .build()
-                .also {
-                    it.setAnalyzer(cameraExecutor) { imageProxy ->
-                        // processImageProxy(imageProxy) — do the heavy work on cameraExecutor
-                        imageProxy.close()
-                    }
-                }
-
-            val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
-
-            try {
-                cameraProvider.unbindAll()
-                cameraProvider.bindToLifecycle(this, cameraSelector, preview, imageAnalysis)
-            } catch (exc: Exception) {
-                // handle errors gracefully and log
-                exc.printStackTrace()
-            }
-        }, ContextCompat.getMainExecutor(this))
-    }
-
-
-
-
-
-
     private fun disconnectUsb() {
         readThread?.interrupt()
         usbSerialPort?.close()
@@ -861,10 +863,10 @@ class MainActivity : AppCompatActivity() {
     private fun sendCommand(command: String) {
         usbSerialPort?.let {
             try {
-                it.write(command.toByteArray(), 1000)  // Timeout 1s
+                it.write(command.toByteArray(), 1000)
             } catch (e: IOException) {
                 Toast.makeText(this, "Error sending: ${e.message}", Toast.LENGTH_SHORT).show()
             }
-        } ?: Toast.makeText(this, "No USB connection", Toast.LENGTH_SHORT).show()
+        }
     }
 }

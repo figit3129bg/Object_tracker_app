@@ -57,6 +57,9 @@ dependencies {
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
+
+    implementation("org.jetbrains.kotlin:kotlin-stdlib")
+
     implementation("androidx.appcompat:appcompat:1.7.1")
     implementation("com.github.mik3y:usb-serial-for-android:3.6.0")  // For USB serial
 

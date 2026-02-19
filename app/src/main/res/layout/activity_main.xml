@@ -29,7 +29,7 @@
             android:layout_height="match_parent"
             android:background="@android:color/transparent" />
 
-        <!-- Menu button -->
+        <!-- Menu button (top-right, on camera) -->
         <Button
             android:id="@+id/selectClassesButton"
             android:layout_width="wrap_content"
@@ -37,6 +37,38 @@
             android:text="Menu"
             android:layout_margin="16dp"
             android:layout_gravity="top|end" />
+
+        <!-- Tracking button + status (top-left, on camera) -->
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_margin="16dp"
+            android:layout_gravity="top|start">
+
+            <Button
+                android:id="@+id/tracking_button"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Start Tracking"
+                android:textSize="13sp"
+                android:textColor="#FFFFFF"
+                android:backgroundTint="#4CAF50" />
+
+            <TextView
+                android:id="@+id/tracking_status"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Status: Inactive"
+                android:textColor="#FFFFFF"
+                android:textSize="12sp"
+                android:paddingStart="10dp"
+                android:shadowColor="#000000"
+                android:shadowDx="1"
+                android:shadowDy="1"
+                android:shadowRadius="3" />
+        </LinearLayout>
 
         <!-- Zoom label -->
         <TextView
